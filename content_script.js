@@ -1,937 +1,448 @@
-// Cortexa Enhanced Content Script - Optimized for Low Latency
-// =============================================================
+// content_script.js - Cortexa (with Groq summarizer support)
+// Minimal UI changes; summarizer now calls background 'summarize' action which uses Groq.
+
 (function() {
-  'use strict';
-  
   if (window.__cortexa_injected) return;
   window.__cortexa_injected = true;
-  
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initCortexa);
-  } else {
-    initCortexa();
+
+  function createPanel() {
+    if (document.getElementById('cortexa-panel')) return;
+    const container = document.createElement('div');
+    container.id = 'cortexa-panel';
+    container.style.cssText = 'position:fixed;right:16px;bottom:16px;width:420px;z-index:2147483647;font-family:system-ui;';
+
+    container.innerHTML = `
+      <div style="background:#fff;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,0.18);overflow:hidden;">
+        <div style="padding:10px 12px;display:flex;align-items:center;background:linear-gradient(90deg,#3b82f6,#7c3aed);color:white;">
+          <div style="font-weight:700;">🎙️ Cortexa</div>
+          <div id="cortexa-status" style="margin-left:auto;font-size:12px;opacity:0.95">idle</div>
+        </div>
+
+        <div id="cortexa-transcript" style="padding:10px;height:170px;overflow:auto;background:#fafafa;font-size:13px;"></div>
+
+        <div style="padding:10px;display:flex;gap:6px;">
+          <button id="cortexa-start">Start</button>
+          <button id="cortexa-stop" disabled>Stop</button>
+          <button id="cortexa-clear">Clear</button>
+          <button id="cortexa-download">Download</button>
+        </div>
+
+        <div style="padding:8px;border-top:1px solid #eee;background:#fff;display:flex;gap:8px;align-items:center;">
+          <select id="cortexa-mode"><option value="mic">Mic Only</option><option value="dual">Dual (Tab + Mic)</option></select>
+          <select id="cortexa-lang"><option value="en">English</option><option value="en-IN">English (India)</option><option value="hi">Hindi</option></select>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+            <button id="cortexa-summarize" title="Summarize current transcript">Summarize</button>
+            <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
+              <input id="cortexa-auto-toggle" type="checkbox"> Auto
+            </label>
+            <input id="cortexa-auto-interval" style="width:60px;font-size:12px;padding:4px;" value="30" title="Auto summarize interval (seconds)">
+          </div>
+        </div>
+
+        <div id="cortexa-summary" style="padding:10px;border-top:1px solid #eee;background:#fff;font-size:13px;display:none;max-height:200px;overflow:auto;"></div>
+      </div>
+    `;
+    document.body.appendChild(container);
+    attachHandlers();
+    showInfo('Click Start. For Dual mode: choose "Share audio" in the share dialog.', 'info');
   }
-  
-  function initCortexa() {
-    if (!document.body) {
-      setTimeout(initCortexa, 100);
-      return;
-    }
 
-    const css = `
-    #cortexa-panel {
-      position: fixed;
-      right: 16px;
-      bottom: 16px;
-      width: 440px;
-      max-height: 70vh;
-      background: rgba(255,255,255,0.98);
-      box-shadow: 0 8px 32px rgba(0,0,0,0.2);
-      border-radius: 16px;
-      z-index: 2147483647;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      color: #111;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      border: 1px solid rgba(0,0,0,0.1);
-    }
-    #cortexa-header {
-      display:flex;
-      align-items:center;
-      gap:8px;
-      padding:12px 14px;
-      border-bottom:1px solid rgba(0,0,0,0.08);
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      user-select: none;
-      color: white;
-    }
-    #cortexa-title {
-      font-weight:700; 
-      font-size:15px; 
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
-    #cortexa-status {
-      font-size: 11px;
-      opacity: 0.9;
-      font-weight: 500;
-    }
-    #cortexa-controls {display:flex; gap:6px; align-items:center; flex-wrap: wrap;}
-    .cortexa-btn {
-      padding:7px 13px;
-      border-radius:8px;
-      border: none;
-      cursor:pointer;
-      font-size:12px;
-      font-weight: 600;
-      transition: all 0.2s;
-      background: rgba(255,255,255,0.95);
-      color: #667eea;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    .cortexa-btn:hover:not(:disabled) {
-      background: white;
-      transform: translateY(-1px);
-      box-shadow: 0 4px 8px rgba(0,0,0,0.15);
-    }
-    .cortexa-btn:disabled {
-      background: rgba(255,255,255,0.5);
-      cursor: not-allowed;
-      opacity: 0.5;
-      color: #999;
-    }
-    .cortexa-btn.active {
-      background: #10b981;
-      color: white;
-    }
-    .cortexa-btn.small {
-      padding: 5px 10px;
-      font-size: 11px;
-    }
-    #cortexa-transcript {
-      padding:14px;
-      overflow-y:auto;
-      overflow-x:hidden;
-      font-size:13.5px;
-      line-height:1.6;
-      max-height: 450px;
-      background: white;
-      flex: 1;
-    }
-    .transcript-entry {
-      margin-bottom: 14px;
-      padding: 10px 12px;
-      border-radius: 10px;
-      background: #f8f9fa;
-      border-left: 4px solid #cbd5e1;
-      animation: slideIn 0.3s ease-out;
-    }
-    @keyframes slideIn {
-      from {
-        opacity: 0;
-        transform: translateY(10px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-    .transcript-entry.me {
-      background: #dbeafe;
-      border-left-color: #3b82f6;
-    }
-    .transcript-entry.remote {
-      background: #fef3c7;
-      border-left-color: #f59e0b;
-    }
-    .transcript-speaker {
-      font-weight: 700;
-      font-size: 12px;
-      margin-bottom: 5px;
-      color: #374151;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-    .speaker-icon {
-      font-size: 14px;
-    }
-    .transcript-text {
-      color: #1f2937;
-      word-wrap: break-word;
-      line-height: 1.5;
-    }
-    .transcript-time {
-      font-size: 10px;
-      color: #9ca3af;
-      margin-top: 5px;
-      font-weight: 500;
-    }
-    #cortexa-footer {
-      padding:12px;
-      border-top:1px solid rgba(0,0,0,0.08);
-      display:flex;
-      flex-direction: column;
-      gap:10px;
-      background: #f9fafb;
-    }
-    #cortexa-mode-selector {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 4px;
-    }
-    .mode-btn {
-      flex: 1;
-      padding: 10px;
-      border-radius: 10px;
-      border: 2px solid #e5e7eb;
-      background: white;
-      cursor: pointer;
-      font-size: 12px;
-      font-weight: 600;
-      text-align: center;
-      transition: all 0.2s;
-      color: #6b7280;
-    }
-    .mode-btn:hover:not(.active) {
-      border-color: #667eea;
-      color: #667eea;
-      background: #f0f4ff;
-    }
-    .mode-btn.active {
-      background: #667eea;
-      color: white;
-      border-color: #667eea;
-    }
-    .mode-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    #cortexa-lang {
-      font-size:12px;
-      padding:8px 10px;
-      border-radius:8px;
-      border:2px solid #e5e7eb;
-      background:white;
-      cursor: pointer;
-      font-weight: 500;
-    }
-    #cortexa-minimize {
-      width:28px;
-      height:28px;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      background: rgba(255,255,255,0.2);
-      border: none;
-      cursor: pointer;
-      font-size: 18px;
-      color: white;
-      border-radius: 6px;
-      font-weight: bold;
-    }
-    #cortexa-minimize:hover {
-      background: rgba(255,255,255,0.3);
-    }
-    #cortexa-interim {
-      opacity: 0.7;
-      font-style: italic;
-      color: #6b7280;
-      margin-top: 8px;
-      padding: 8px 10px;
-      background: #f3f4f6;
-      border-radius: 8px;
-      font-size: 12px;
-      border-left: 3px solid #9ca3af;
-    }
-    .status-indicator {
-      display: inline-block;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      margin-right: 6px;
-      animation: pulse 2s ease-in-out infinite;
-    }
-    .status-indicator.listening {
-      background: #10b981;
-    }
-    .status-indicator.processing {
-      background: #f59e0b;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.6; transform: scale(0.95); }
-    }
-    .info-box {
-      padding: 10px 12px;
-      border-radius: 8px;
-      font-size: 12px;
-      margin: 8px 0;
-      line-height: 1.5;
-    }
-    .info-box.info {
-      background: #dbeafe;
-      color: #1e40af;
-      border-left: 3px solid #3b82f6;
-    }
-    .info-box.warning {
-      background: #fef3c7;
-      color: #92400e;
-      border-left: 3px solid #f59e0b;
-    }
-    .info-box.error {
-      background: #fee2e2;
-      color: #991b1b;
-      border-left: 3px solid #ef4444;
-    }
-    .info-box.success {
-      background: #d1fae5;
-      color: #065f46;
-      border-left: 3px solid #10b981;
-    }
-    .latency-badge {
-      font-size: 10px;
-      padding: 2px 6px;
-      border-radius: 4px;
-      background: rgba(255,255,255,0.3);
-      margin-left: auto;
-    }
-    `;
+  function showInfo(msg, type = 'info') {
+    const div = document.getElementById('cortexa-transcript');
+    if (!div) return;
+    const box = document.createElement('div');
+    box.style.padding = '8px';
+    box.style.borderRadius = '8px';
+    box.style.marginBottom = '8px';
+    box.style.fontSize = '13px';
+    if (type === 'error') { box.style.background = '#fee2e2'; box.style.color = '#991b1b'; }
+    else if (type === 'warning') { box.style.background = '#fef3c7'; box.style.color = '#92400e'; }
+    else { box.style.background = '#dbeafe'; box.style.color = '#064e3b'; }
+    box.textContent = msg;
+    div.insertBefore(box, div.firstChild);
+    if (type !== 'error') setTimeout(()=> { if (box.parentNode) box.remove(); }, 9000);
+  }
 
-    const style = document.createElement('style');
-    style.textContent = css;
-    document.head.appendChild(style);
-
-    const existingPanel = document.getElementById('cortexa-panel');
-    if (existingPanel) existingPanel.remove();
-
-    const panel = document.createElement('div');
-    panel.id = 'cortexa-panel';
-    panel.innerHTML = `
-      <div id="cortexa-header">
-        <div id="cortexa-title">
-          <div>🎙️ Cortexa Enhanced</div>
-          <div id="cortexa-status"></div>
-        </div>
-        <div id="cortexa-controls">
-          <button id="cortexa-start" class="cortexa-btn">Start</button>
-          <button id="cortexa-stop" class="cortexa-btn" disabled>Stop</button>
-          <button id="cortexa-download" class="cortexa-btn small" title="Download transcript">💾</button>
-          <button id="cortexa-clear" class="cortexa-btn small" title="Clear transcript">🗑️</button>
-          <button id="cortexa-minimize" title="Minimize">−</button>
-        </div>
-      </div>
-      <div id="cortexa-transcript" aria-live="polite"></div>
-      <div id="cortexa-footer">
-        <div id="cortexa-mode-selector">
-          <button class="mode-btn active" data-mode="mic">🎤 Mic Only</button>
-          <button class="mode-btn" data-mode="dual">🎧 Dual Audio</button>
-        </div>
-        <select id="cortexa-lang" title="Recognition language">
-          <option value="en">English</option>
-          <option value="hi">Hindi</option>
-          <option value="es">Spanish</option>
-          <option value="fr">French</option>
-          <option value="de">German</option>
-          <option value="ja">Japanese</option>
-          <option value="zh">Chinese</option>
-        </select>
-        <div style="font-size:11px;color:#6b7280;line-height:1.5">
-          <strong>Mic:</strong> Your voice | <strong>Dual:</strong> You + Remote (2s chunks, optimized)
-        </div>
-      </div>
-    `;
-    
-    document.body.appendChild(panel);
-    setupPanel();
-
-    function setupPanel() {
-      // Make draggable
-      (function makeDraggable(target) {
-        let isDown = false, startX, startY, origX, origY;
-        const header = target.querySelector('#cortexa-header');
-        header.style.cursor = 'grab';
-        
-        header.addEventListener('pointerdown', (e) => {
-          if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
-          isDown = true;
-          startX = e.clientX; 
-          startY = e.clientY;
-          const rect = target.getBoundingClientRect();
-          origX = rect.left; 
-          origY = rect.top;
-          header.style.cursor = 'grabbing';
-          e.preventDefault();
-        });
-        
-        window.addEventListener('pointermove', (e) => {
-          if (!isDown) return;
-          const dx = e.clientX - startX;
-          const dy = e.clientY - startY;
-          target.style.right = 'auto';
-          target.style.bottom = 'auto';
-          target.style.left = Math.max(0, Math.min(window.innerWidth - target.offsetWidth, origX + dx)) + 'px';
-          target.style.top = Math.max(0, Math.min(window.innerHeight - target.offsetHeight, origY + dy)) + 'px';
-        });
-        
-        window.addEventListener('pointerup', () => {
-          if (isDown) {
-            isDown = false;
-            header.style.cursor = 'grab';
-          }
-        });
-      })(panel);
-
-      // Transcript Manager - OPTIMIZED
-      const TranscriptManager = {
-        mode: 'mic',
-        micRecognition: null,
-        mediaRecorder: null,
-        audioChunks: [],
-        tabStream: null,
-        running: false,
-        entries: [],
-        processingQueue: [],
-        isProcessing: false,
-        chunkDuration: 2000, // 2 seconds for lower latency
-        keepAlivePort: null,
-        lastRemoteText: '', // Track last remote text to avoid duplicates
-        
-        async checkApiKey() {
-          try {
-            const response = await chrome.runtime.sendMessage({ action: 'checkApiKey' });
-            return response.configured;
-          } catch (e) {
-            return false;
-          }
-        },
-        
-        async loadConfig() {
-          try {
-            const response = await chrome.runtime.sendMessage({ action: 'getConfig' });
-            if (response.config) {
-              this.chunkDuration = response.config.CHUNK_DURATION || 2000;
-            }
-          } catch (e) {
-            console.log('Using default config');
-          }
-        },
-        
-        init() {
-          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-          if (!SpeechRecognition) {
-            this.showMessage("SpeechRecognition not supported. Use Chrome/Edge.", 'error');
-            return false;
-          }
-          return true;
-        },
-        
-        createRecognition(lang) {
-          const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-          const recognition = new SpeechRecognition();
-          recognition.continuous = true;
-          recognition.interimResults = true;
-          recognition.maxAlternatives = 1;
-          // Use just language code for SpeechRecognition
-          recognition.lang = lang === 'en' ? 'en-US' : `${lang}-${lang.toUpperCase()}`;
-          return recognition;
-        },
-        
-        async startMicOnly() {
-          if (!this.init()) return;
-          await this.loadConfig();
-          
-          const lang = panel.querySelector('#cortexa-lang').value;
-          this.micRecognition = this.createRecognition(lang);
-          
-          this.micRecognition.onstart = () => {
-            this.updateStatus('Listening to microphone...');
-          };
-          
-          this.micRecognition.onresult = (evt) => {
-            let interim = '', final = '';
-            for (let i = evt.resultIndex; i < evt.results.length; ++i) {
-              const res = evt.results[i];
-              if (res.isFinal) final += res[0].transcript;
-              else interim += res[0].transcript;
-            }
-            if (final) this.addEntry('You', final, 'me');
-            if (interim) this.showInterim(interim);
-          };
-          
-          this.micRecognition.onerror = (e) => {
-            if (e.error !== 'aborted' && e.error !== 'no-speech') {
-              console.error('Mic error:', e.error);
-            }
-          };
-          
-          this.micRecognition.onend = () => {
-            if (this.running && this.mode === 'mic') {
-              setTimeout(() => {
-                if (this.running && this.micRecognition) {
-                  try { this.micRecognition.start(); } catch(e) {}
-                }
-              }, 100);
-            }
-          };
-          
-          this.running = true;
-          this.micRecognition.start();
-          this.showMessage('🎤 Mic Only: Capturing your voice', 'info');
-          updateButtons();
-        },
-        
-        async startDualAudio() {
-          if (!this.init()) return;
-          await this.loadConfig();
-          
-          const apiConfigured = await this.checkApiKey();
-          if (!apiConfigured) {
-            this.showMessage('⚠️ OpenAI API key not configured! Add it to background.js.', 'error');
-            console.error('%c❌ API KEY MISSING', 'color:red;font-size:16px;font-weight:bold');
-            console.log('Get key: https://platform.openai.com/api-keys');
-            console.log('Edit: background.js line 7');
-            this.mode = 'mic';
-            panel.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'mic'));
-            return;
-          }
-          
-          try {
-            this.showMessage('📺 Select tab & CHECK "Share tab audio" + "Share system audio"', 'info');
-            
-            const stream = await navigator.mediaDevices.getDisplayMedia({
-              video: { mediaSource: 'tab' },
-              audio: { 
-                echoCancellation: false, // Disable for call audio
-                noiseSuppression: false,
-                autoGainControl: false,
-                channelCount: 2 // Stereo for better quality
-              },
-              preferCurrentTab: true
-            });
-            
-            const audioTracks = stream.getAudioTracks();
-            if (audioTracks.length === 0) {
-              throw new Error('No audio! Please check "Share tab audio" AND "Share system audio"');
-            }
-            
-            console.log('Audio track settings:', audioTracks[0].getSettings());
-            
-            this.tabStream = stream;
-            const lang = panel.querySelector('#cortexa-lang').value;
-            
-            // Start mic recognition
-            this.micRecognition = this.createRecognition(lang);
-            this.micRecognition.onresult = (evt) => {
-              let interim = '', final = '';
-              for (let i = evt.resultIndex; i < evt.results.length; ++i) {
-                const res = evt.results[i];
-                if (res.isFinal) final += res[0].transcript;
-                else interim += res[0].transcript;
-              }
-              if (final) this.addEntry('You', final, 'me');
-              if (interim) this.showInterim(interim);
-            };
-            this.micRecognition.onerror = (e) => {
-              if (e.error !== 'aborted' && e.error !== 'no-speech') {
-                console.error('Mic error:', e.error);
-              }
-            };
-            this.micRecognition.onend = () => {
-              if (this.running && this.mode === 'dual') {
-                setTimeout(() => {
-                  if (this.running && this.micRecognition) {
-                    try { this.micRecognition.start(); } catch(e) {}
-                  }
-                }, 100);
-              }
-            };
-            
-            // Keep service worker alive
-            this.keepAlivePort = chrome.runtime.connect({ name: 'keepAlive' });
-            
-            // Setup MediaRecorder with optimized settings
-            const options = { 
-              mimeType: 'audio/webm;codecs=opus',
-              audioBitsPerSecond: 64000 // Lower bitrate for faster upload
-            };
-            
-            this.mediaRecorder = new MediaRecorder(stream, options);
-            this.audioChunks = [];
-            
-            this.mediaRecorder.ondataavailable = (e) => {
-              if (e.data.size > 0) {
-                this.audioChunks.push(e.data);
-              }
-            };
-            
-            this.mediaRecorder.onstop = async () => {
-              if (this.audioChunks.length > 0) {
-                // Queue processing to avoid blocking
-                this.processingQueue.push([...this.audioChunks]);
-                this.audioChunks = [];
-                this.processQueue();
-              }
-            };
-            
-            this.mediaRecorder.start();
-            
-            // Process audio every 2 seconds (optimized)
-            this.audioProcessInterval = setInterval(() => {
-              if (this.running && this.mediaRecorder && this.mediaRecorder.state === 'recording') {
-                this.mediaRecorder.stop();
-                setTimeout(() => {
-                  if (this.running && this.mediaRecorder) {
-                    this.audioChunks = [];
-                    try {
-                      this.mediaRecorder.start();
-                    } catch(e) {
-                      console.error('Failed to restart recorder:', e);
-                    }
-                  }
-                }, 50); // Minimal delay
-              }
-            }, this.chunkDuration);
-            
-            this.running = true;
-            this.micRecognition.start();
-            
-            this.updateStatus('Dual Audio: Mic + Remote (2s)');
-            this.showMessage('✅ Dual Audio active! Processing every 2 seconds.', 'success');
-            updateButtons();
-            
-            // Handle tab sharing stop
-            stream.getVideoTracks()[0].onended = () => {
-              if (this.running) {
-                this.showMessage('⚠️ Sharing stopped. Switching to Mic Only.', 'warning');
-                this.stop();
-                setTimeout(() => { 
-                  this.mode = 'mic'; 
-                  panel.querySelectorAll('.mode-btn').forEach(b => 
-                    b.classList.toggle('active', b.dataset.mode === 'mic')
-                  );
-                  this.start(); 
-                }, 500);
-              }
-            };
-            
-          } catch(err) {
-            console.error('Tab capture failed:', err);
-            this.showMessage(`❌ ${err.message}`, 'error');
-            this.mode = 'mic';
-            panel.querySelectorAll('.mode-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === 'mic'));
-          }
-        },
-        
-        async processQueue() {
-          if (this.isProcessing || this.processingQueue.length === 0) return;
-          
-          this.isProcessing = true;
-          const chunks = this.processingQueue.shift();
-          
-          await this.processRemoteAudio(chunks);
-          
-          this.isProcessing = false;
-          
-          // Process next in queue
-          if (this.processingQueue.length > 0) {
-            setTimeout(() => this.processQueue(), 10);
-          }
-        },
-        
-        async processRemoteAudio(chunks) {
-          if (!chunks || chunks.length === 0) return;
-          
-          const startTime = performance.now();
-          this.updateStatus('Processing remote audio...', true);
-          
-          try {
-            const audioBlob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
-            
-            // Skip very small audio chunks
-            if (audioBlob.size < 8000) {
-              this.updateStatus('Dual Audio: Mic + Remote (2s)');
+  function sendMessageToBg(msg, tries = 0) {
+    return new Promise((resolve, reject) => {
+      try {
+        chrome.runtime.sendMessage(msg, (resp) => {
+          const err = chrome.runtime.lastError;
+          if (err) {
+            if (tries < 1) {
+              setTimeout(() => sendMessageToBg(msg, tries + 1).then(resolve).catch(reject), 300);
               return;
             }
-            
-            const lang = panel.querySelector('#cortexa-lang').value;
-            const response = await chrome.runtime.sendMessage({
-              action: 'transcribeAudio',
-              audioBlob: audioBlob,
-              language: lang
-            });
-            
-            if (response.success && response.transcript) {
-              const text = response.transcript.trim();
-              
-              // Filter out duplicates and very short text
-              if (text && text.length > 3 && text !== this.lastRemoteText) {
-                // Check if it's significantly different from last
-                const similarity = this.calculateSimilarity(text, this.lastRemoteText);
-                if (similarity < 0.8) { // Less than 80% similar
-                  // ===================================================
-                  // === ⭐️ KEY CHANGE HERE ⭐️ ===
-                  // ===================================================
-                  this.addEntry('User', text, 'remote'); 
-                  // ===================================================
-
-                  this.lastRemoteText = text;
-                  
-                  const processingTime = performance.now() - startTime;
-                  console.log(`✅ Remote [${processingTime.toFixed(0)}ms]:`, text);
-                }
-              }
-            } else if (response.error) {
-              console.error('Transcription error:', response.error);
-              if (!response.error.includes('timeout')) {
-                this.showMessage(`⚠️ ${response.error}`, 'warning');
-              }
-            }
-            
-          } catch (err) {
-            console.error('Processing error:', err);
-          } finally {
-            this.updateStatus('Dual Audio: Mic + Remote (2s)');
-          }
-        },
-        
-        calculateSimilarity(str1, str2) {
-          if (!str1 || !str2) return 0;
-          const longer = str1.length > str2.length ? str1 : str2;
-          const shorter = str1.length > str2.length ? str2 : str1;
-          if (longer.length === 0) return 1.0;
-          const editDistance = this.levenshteinDistance(longer, shorter);
-          return (longer.length - editDistance) / longer.length;
-        },
-        
-        levenshteinDistance(str1, str2) {
-          const matrix = [];
-          for (let i = 0; i <= str2.length; i++) {
-            matrix[i] = [i];
-          }
-          for (let j = 0; j <= str1.length; j++) {
-            matrix[0][j] = j;
-          }
-          for (let i = 1; i <= str2.length; i++) {
-            for (let j = 1; j <= str1.length; j++) {
-              if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-                matrix[i][j] = matrix[i - 1][j - 1];
-              } else {
-                matrix[i][j] = Math.min(
-                  matrix[i - 1][j - 1] + 1,
-                  matrix[i][j - 1] + 1,
-                  matrix[i - 1][j] + 1
-                );
-              }
-            }
-          }
-          return matrix[str2.length][str1.length];
-        },
-        
-        async start() {
-          if (this.mode === 'dual') await this.startDualAudio();
-          else await this.startMicOnly();
-        },
-        
-        stop() {
-          this.running = false;
-          
-          if (this.keepAlivePort) {
-            try { this.keepAlivePort.disconnect(); } catch(e) {}
-            this.keepAlivePort = null;
-          }
-          
-          if (this.micRecognition) {
-            try { this.micRecognition.stop(); } catch(e) {}
-            this.micRecognition = null;
-          }
-          
-          if (this.mediaRecorder) {
-            try { 
-              if (this.mediaRecorder.state !== 'inactive') {
-                this.mediaRecorder.stop(); 
-              }
-            } catch(e) {}
-            this.mediaRecorder = null;
-          }
-          
-          if (this.audioProcessInterval) {
-            clearInterval(this.audioProcessInterval);
-            this.audioProcessInterval = null;
-          }
-          
-          if (this.tabStream) {
-            this.tabStream.getTracks().forEach(t => t.stop());
-            this.tabStream = null;
-          }
-          
-          this.audioChunks = [];
-          this.processingQueue = [];
-          this.isProcessing = false;
-          this.lastRemoteText = '';
-          this.updateStatus('');
-          updateButtons();
-        },
-        
-        addEntry(speaker, text, type) {
-          text = text.trim();
-          if (!text) return;
-          const time = new Date().toLocaleTimeString('en-US', { 
-            hour: '2-digit', minute: '2-digit', second: '2-digit'
-          });
-          this.entries.push({ speaker, text, time, type });
-          this.render();
-        },
-        
-        render() {
-          const div = panel.querySelector('#cortexa-transcript');
-          const infoMsgs = Array.from(div.querySelectorAll('.info-box'));
-          
-          let html = infoMsgs.map(m => m.outerHTML).join('');
-          
-          if (this.entries.length === 0 && infoMsgs.length === 0) {
-            html += '<div class="info-box info">Click <strong>Start</strong> to begin transcription.</div>';
-          } else {
-            this.entries.forEach(e => {
-              const icon = e.type === 'me' ? '👤' : '👥';
-              html += `
-                <div class="transcript-entry ${e.type}">
-                  <div class="transcript-speaker"><span class="speaker-icon">${icon}</span>${e.speaker}</div>
-                  <div class="transcript-text">${e.text}</div>
-                  <div class="transcript-time">${e.time}</div>
-                </div>
-              `;
-            });
-          }
-          
-          div.innerHTML = html;
-          div.scrollTop = div.scrollHeight;
-        },
-        
-        showInterim(text) {
-          const div = panel.querySelector('#cortexa-transcript');
-          let el = document.getElementById('cortexa-interim');
-          if (!el && text) {
-            el = document.createElement('div');
-            el.id = 'cortexa-interim';
-            div.appendChild(el);
-          }
-          if (el) {
-            if (text) {
-              el.textContent = `"${text}..."`;
-              div.scrollTop = div.scrollHeight;
-            } else {
-              el.remove();
-            }
-          }
-        },
-        
-        updateStatus(text, processing = false) {
-          const status = panel.querySelector('#cortexa-status');
-          if (text) {
-            const cls = processing ? 'processing' : 'listening';
-            status.innerHTML = `<span class="status-indicator ${cls}"></span>${text}`;
-          } else {
-            status.innerHTML = '';
-          }
-        },
-        
-        showMessage(msg, type = 'info') {
-          const div = panel.querySelector('#cortexa-transcript');
-          const m = document.createElement('div');
-          m.className = `info-box ${type}`;
-          m.innerHTML = msg;
-          if (div.firstChild) div.insertBefore(m, div.firstChild);
-          else div.appendChild(m);
-          div.scrollTop = 0;
-          if (type === 'info' || type === 'success') {
-            setTimeout(() => { if (m.parentNode) m.remove(); }, 8000);
-          }
-        },
-        
-        clear() {
-          this.entries = [];
-          this.lastRemoteText = '';
-          this.render();
-          const el = document.getElementById('cortexa-interim');
-          if (el) el.remove();
-        },
-        
-        download() {
-          if (this.entries.length === 0) {
-            alert('No transcript to download');
+            reject(err);
             return;
           }
-          let text = `Cortexa Transcript\nDate: ${new Date().toLocaleString()}\n${'='.repeat(60)}\n\n`;
-          this.entries.forEach(e => {
-            text += `[${e.time}] ${e.speaker}:\n${e.text}\n\n`;
-          });
-          const blob = new Blob([text], {type: 'text/plain'});
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `cortexa-${new Date().toISOString().slice(0,19).replace(/:/g, '-')}.txt`;
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => {
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-          }, 100);
-        }
-      };
+          resolve(resp);
+        });
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
 
-      function updateButtons() {
-        const start = panel.querySelector('#cortexa-start');
-        const stop = panel.querySelector('#cortexa-stop');
-        const lang = panel.querySelector('#cortexa-lang');
-        const modes = panel.querySelectorAll('.mode-btn');
-        if (start) start.disabled = TranscriptManager.running;
-        if (stop) stop.disabled = !TranscriptManager.running;
-        if (lang) lang.disabled = TranscriptManager.running;
-        modes.forEach(b => b.disabled = TranscriptManager.running);
+  function attachHandlers() {
+    const start = document.getElementById('cortexa-start');
+    const stop = document.getElementById('cortexa-stop');
+    const clear = document.getElementById('cortexa-clear');
+    const download = document.getElementById('cortexa-download');
+    const summarizeBtn = document.getElementById('cortexa-summarize');
+    const autoToggle = document.getElementById('cortexa-auto-toggle');
+    const autoInterval = document.getElementById('cortexa-auto-interval');
+    const modeSel = document.getElementById('cortexa-mode');
+    const langSel = document.getElementById('cortexa-lang');
+
+    let recognizer = null;
+    let mediaRecorder = null;
+    let tabStream = null;
+    let mediaChunks = [];
+    let running = false;
+    let processingQueue = [];
+    let isProcessing = false;
+    let autoTimer = null;
+
+    function updateButtons() {
+      document.getElementById('cortexa-start').disabled = running;
+      document.getElementById('cortexa-stop').disabled = !running;
+      modeSel.disabled = running;
+      langSel.disabled = running;
+      summarizeBtn.disabled = false;
+    }
+
+    function appendEntry(speaker, text, type='remote') {
+      const div = document.getElementById('cortexa-transcript');
+      const entry = document.createElement('div');
+      entry.style.marginBottom = '8px';
+      entry.style.padding = '8px';
+      entry.style.borderRadius = '8px';
+      entry.style.background = (type === 'me') ? '#dbeafe' : '#fff8dc';
+      entry.innerHTML = `<div style="font-weight:700;font-size:12px;margin-bottom:4px">${speaker}</div><div style="font-size:14px;white-space:pre-wrap">${escapeHtml(text)}</div><div style="font-size:11px;color:#666;margin-top:6px">${new Date().toLocaleTimeString()}</div>`;
+      div.appendChild(entry);
+      div.scrollTop = div.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/[&<>"']/g, (m) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+    }
+
+    function showSummaryBlock(content) {
+      const s = document.getElementById('cortexa-summary');
+      s.style.display = 'block';
+      s.innerHTML = `<div style="font-weight:700;margin-bottom:8px">Summary</div><div style="white-space:pre-wrap">${escapeHtml(content)}</div>`;
+      s.scrollTop = s.scrollHeight;
+    }
+
+    async function summarizeNow() {
+      const transcriptDiv = document.getElementById('cortexa-transcript');
+      if (!transcriptDiv) return;
+      const fullText = transcriptDiv.innerText.trim();
+      if (!fullText) {
+        showInfo('Nothing to summarize yet.', 'warning');
+        return;
       }
 
-      // Event listeners
-      panel.querySelector('#cortexa-start')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        TranscriptManager.start();
-      });
-      
-      panel.querySelector('#cortexa-stop')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        TranscriptManager.stop();
-      });
-      
-      panel.querySelector('#cortexa-clear')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (TranscriptManager.running) {
-          if (!confirm('Stop and clear transcript?')) return;
-          TranscriptManager.stop();
-        }
-        TranscriptManager.clear();
-      });
-      
-      panel.querySelector('#cortexa-download')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        TranscriptManager.download();
-      });
-      
-      panel.querySelector('#cortexa-minimize')?.addEventListener('click', (e) => {
-        e.preventDefault();
-        const t = document.getElementById('cortexa-transcript');
-        const f = document.getElementById('cortexa-footer');
-        if (t && f) {
-          if (t.style.display === 'none') {
-            t.style.display = '';
-            f.style.display = '';
-            e.target.textContent = '−';
+      // Avoid sending extremely large text; send the most recent segment
+      const MAX_CHARS = 3200;
+      let textToSend = fullText;
+      let truncatedNotice = '';
+      if (fullText.length > MAX_CHARS) {
+        textToSend = fullText.slice(-MAX_CHARS);
+        truncatedNotice = '(...transcript truncated; sending the most recent part...)\n\n';
+      }
+
+      // Check Groq key presence (background will check thoroughly)
+      const check = await sendMessageToBg({ action: 'checkApiKey' }).catch(() => null);
+      if (!check || !check.configured || !check.configured.groq) {
+        showInfo('Groq API key not configured — open the Cortexa popup and set your Groq key to enable summarization (free).', 'warning');
+        return;
+      }
+
+      document.getElementById('cortexa-status').textContent = 'Summarizing…';
+      summarizeBtn.disabled = true;
+
+      try {
+        const resp = await sendMessageToBg({ action: 'summarize', text: truncatedNotice + textToSend, max_points: 6 });
+        if (resp && resp.success && resp.summary) {
+          showSummaryBlock(resp.summary);
+        } else {
+          const err = resp && resp.error ? resp.error : 'Unknown error';
+          if (typeof err === 'string') {
+            if (err.toLowerCase().includes('quota') || err.toLowerCase().includes('rate limit')) {
+              showInfo('Summarization failed — API quota / rate limit: ' + err, 'error');
+            } else if (err.toLowerCase().includes('invalid') && err.toLowerCase().includes('key')) {
+              showInfo('Summarization failed — Invalid Groq API key. Set a valid key in the popup.', 'error');
+            } else {
+              showInfo('Summarization failed: ' + err, 'warning');
+            }
           } else {
-            t.style.display = 'none';
-            f.style.display = 'none';
-            e.target.textContent = '+';
+            showInfo('Summarization failed: ' + String(err), 'warning');
           }
         }
-      });
-      
-      panel.querySelectorAll('.mode-btn').forEach(b => {
-        b.addEventListener('click', () => {
-          if (TranscriptManager.running) return;
-          panel.querySelectorAll('.mode-btn').forEach(x => x.classList.remove('active'));
-          b.classList.add('active');
-          TranscriptManager.mode = b.dataset.mode;
-        });
-      });
-
-      TranscriptManager.render();
-      updateButtons();
-      
-      window.__cortexa = { panel, TranscriptManager };
-      console.log('✅ Cortexa Enhanced loaded - Low latency mode');
+      } catch (err) {
+        console.error('summarizeNow error', err);
+        showInfo('Summarization request failed: ' + (err && err.message ? err.message : String(err)), 'error');
+      } finally {
+        document.getElementById('cortexa-status').textContent = running ? 'listening' : 'idle';
+        summarizeBtn.disabled = false;
+      }
     }
+
+    function startAutoSummarize() {
+      const secs = Math.max(10, parseInt(autoInterval.value || '30', 10));
+      summarizeNow();
+      autoTimer = setInterval(summarizeNow, secs * 1000);
+      showInfo('Auto-summarize ON — every ' + secs + 's', 'info');
+    }
+
+    function stopAutoSummarize() {
+      if (autoTimer) { clearInterval(autoTimer); autoTimer = null; showInfo('Auto-summarize OFF', 'info'); }
+    }
+
+    async function createRecognition(lang) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        showInfo('SpeechRecognition not supported in this browser. Use Chrome/Edge desktop.', 'error');
+        return null;
+      }
+      const r = new SpeechRecognition();
+      r.continuous = true;
+      r.interimResults = true;
+      r.lang = (lang === 'en-IN') ? 'en-IN' : (lang === 'hi' ? 'hi-IN' : 'en-US');
+      return r;
+    }
+
+    async function startMicOnly() {
+      const lang = langSel.value || 'en';
+      recognizer = await createRecognition(lang);
+      if (!recognizer) return;
+      recognizer.onresult = (evt) => {
+        let final = '', interim = '';
+        for (let i = evt.resultIndex; i < evt.results.length; i++) {
+          const res = evt.results[i];
+          if (res.isFinal) final += res[0].transcript;
+          else interim += res[0].transcript;
+        }
+        if (final) appendEntry('You', final, 'me');
+        showInterim(interim);
+      };
+      recognizer.onerror = (e) => {
+        console.warn('recognition error', e);
+        if (e.error !== 'no-speech') showInfo('SpeechRecognition error: ' + (e.error || e.message), 'warning');
+      };
+      recognizer.onend = () => {
+        if (running && modeSel.value === 'mic') {
+          try { recognizer.start(); } catch(_) {}
+        }
+      };
+      running = true;
+      try { recognizer.start(); } catch (e) { console.warn(e); }
+      updateButtons();
+      document.getElementById('cortexa-status').textContent = 'listening';
+      showInfo('Mic only: listening to your microphone', 'info');
+    }
+
+    function showInterim(text) {
+      let el = document.getElementById('cortexa-interim');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'cortexa-interim';
+        el.style.opacity = '0.7';
+        el.style.fontStyle = 'italic';
+        el.style.padding = '6px';
+        el.style.marginTop = '6px';
+        document.getElementById('cortexa-transcript').appendChild(el);
+      }
+      if (text) el.textContent = `"${text}..."`;
+      else el.remove();
+    }
+
+    async function startDual() {
+      // check OpenAI key presence for dual transcription (Whisper)
+      const check = await sendMessageToBg({ action: 'checkApiKey' }).catch(() => null);
+      const openaiOk = check && check.configured && check.configured.openai;
+      if (!openaiOk) {
+        showInfo('OpenAI API key not configured — Dual mode requires it for Whisper transcription. Switching to mic-only.', 'warning');
+        modeSel.value = 'mic';
+        return startMicOnly();
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { mediaSource: 'tab' },
+          audio: true
+        });
+
+        const audioTracks = stream.getAudioTracks();
+        if (!audioTracks || audioTracks.length === 0) throw new Error('No audio track — check "Share audio" in the share dialog.');
+
+        // start mic listening as well
+        await startMicOnly();
+
+        tabStream = stream;
+        mediaChunks = [];
+        let options = { mimeType: 'audio/webm;codecs=opus' };
+        try { mediaRecorder = new MediaRecorder(tabStream, options); } catch { mediaRecorder = new MediaRecorder(tabStream); }
+
+        mediaRecorder.ondataavailable = (ev) => { if (ev.data && ev.data.size > 0) mediaChunks.push(ev.data); };
+        mediaRecorder.onstop = () => {
+          if (mediaChunks.length > 0) {
+            processingQueue.push([...mediaChunks]);
+            mediaChunks = [];
+            processQueue();
+          }
+        };
+
+        mediaRecorder.start();
+        const chunkMs = 2000;
+        const interval = setInterval(() => {
+          if (!running || !mediaRecorder) { clearInterval(interval); return; }
+          try {
+            if (mediaRecorder.state === 'recording') mediaRecorder.stop();
+            setTimeout(() => {
+              if (mediaRecorder && mediaRecorder.state === 'inactive') {
+                try { mediaRecorder.start(); } catch (e) {}
+              }
+            }, 60);
+          } catch (e) { console.warn('recorder restart error', e); }
+        }, chunkMs);
+
+        const videoTrack = stream.getVideoTracks()[0];
+        if (videoTrack) {
+          videoTrack.onended = () => {
+            showInfo('Tab sharing stopped. Switching to Mic only.', 'warning');
+            stopAll();
+            modeSel.value = 'mic';
+            startMicOnly();
+          };
+        }
+
+        updateButtons();
+        document.getElementById('cortexa-status').textContent = 'listening (dual)';
+        showInfo('Dual mode active — processing tab audio every 2s.', 'info');
+
+      } catch (err) {
+        console.error('Tab capture failed:', err);
+        showInfo('Tab capture failed: ' + (err.message || String(err)), 'error');
+        modeSel.value = 'mic';
+        startMicOnly();
+      }
+    }
+
+    async function processQueue() {
+      if (isProcessing || processingQueue.length === 0) return;
+      isProcessing = true;
+      const chunks = processingQueue.shift();
+      try {
+        const blob = new Blob(chunks, { type: 'audio/webm;codecs=opus' });
+        if (blob.size < 8000) { isProcessing = false; return; }
+
+        let resp;
+        try {
+          resp = await sendMessageToBg({ action: 'transcribeAudio', audioBlob: blob, language: langSel.value });
+        } catch (err) {
+          console.warn('Send to background failed, retrying once', err);
+          try {
+            await new Promise(r => setTimeout(r, 300));
+            resp = await sendMessageToBg({ action: 'transcribeAudio', audioBlob: blob, language: langSel.value });
+          } catch (err2) {
+            console.error('Send retry failed', err2);
+            showInfo('Failed to send audio to background: ' + (err2.message || err2), 'error');
+            isProcessing = false;
+            return;
+          }
+        }
+
+        if (resp && resp.success && resp.transcript) {
+          const text = resp.transcript.trim();
+          if (text && text.length > 2) appendEntry('Participant', text, 'remote');
+        } else {
+          const e = resp && resp.error ? resp.error : 'Unknown transcription error';
+          if (typeof e === 'string' && e.startsWith('quota_exceeded')) {
+            showInfo('Transcription failed — OpenAI quota exceeded. Check your OpenAI plan/billing.', 'error');
+          } else if (typeof e === 'string' && e.startsWith('invalid_key')) {
+            showInfo('Transcription failed — Invalid OpenAI API key. Set a valid key in extension popup.', 'error');
+          } else {
+            showInfo('Transcription failed: ' + e, 'warning');
+          }
+        }
+      } catch (err) {
+        console.error('processQueue error', err);
+      } finally {
+        isProcessing = false;
+        if (processingQueue.length > 0) setTimeout(() => processQueue(), 50);
+      }
+    }
+
+    function stopAll() {
+      running = false;
+      try { recognizer && recognizer.stop(); } catch(e){}
+      try { if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop(); } catch(e){}
+      try { if (tabStream) tabStream.getTracks().forEach(t => t.stop()); } catch(e){}
+      mediaRecorder = null;
+      tabStream = null;
+      mediaChunks = [];
+      processingQueue = [];
+      stopAutoSummarize();
+      updateButtons();
+      document.getElementById('cortexa-status').textContent = 'idle';
+    }
+
+    start.addEventListener('click', async () => {
+      if (running) return;
+      const mode = modeSel.value;
+      if (mode === 'mic') {
+        await startMicOnly();
+      } else {
+        await startDual();
+      }
+    });
+
+    stop.addEventListener('click', () => {
+      stopAll();
+      showInfo('Stopped', 'info');
+    });
+
+    clear.addEventListener('click', () => {
+      const div = document.getElementById('cortexa-transcript');
+      div.innerHTML = '';
+      document.getElementById('cortexa-summary').style.display = 'none';
+    });
+
+    download.addEventListener('click', () => {
+      const content = document.getElementById('cortexa-transcript').innerText;
+      if (!content.trim()) return alert('No transcript to download');
+      const blob = new Blob([content], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `cortexa-${(new Date()).toISOString().slice(0,19).replace(/:/g,'-')}.txt`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
+
+    summarizeBtn.addEventListener('click', summarizeNow);
+    autoToggle.addEventListener('change', () => {
+      if (autoToggle.checked) startAutoSummarize(); else stopAutoSummarize();
+    });
+
+    // when user focuses input, pause auto summarization (helpful UX)
+    document.addEventListener('focusin', (e) => {
+      if (autoTimer && (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA'))) {
+        stopAutoSummarize();
+        autoToggle.checked = false;
+        showInfo('Auto summarize paused while typing.', 'info');
+      }
+    });
   }
+
+  // inject and re-inject for dynamic pages
+  createPanel();
+  const obs = new MutationObserver(() => {
+    if (!document.getElementById('cortexa-panel')) createPanel();
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+
 })();
