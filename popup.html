@@ -1,0 +1,40 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Cortexa — Controls</title>
+  <style>
+    body {font-family: system-ui, -apple-system, 'Segoe UI', Roboto; width:360px; padding:12px; box-sizing:border-box;}
+    h1 {font-size:16px; margin:0 0 8px 0;}
+    p {font-size:13px; color:#333; margin:6px 0;}
+    button {padding:8px 10px; border-radius:8px; border:none; cursor:pointer; background:#0b63d3; color:white;}
+    .note{font-size:12px;color:#555;margin-top:8px;}
+  </style>
+</head>
+<body>
+  <h1>Cortexa — Live Call Transcription</h1>
+  <p><strong>How to use:</strong></p>
+  <ol style="margin: 8px 0; padding-left: 20px;">
+    <li>Open a video call (Google Meet, Zoom, etc.)</li>
+    <li>A floating panel will appear on the page</li>
+    <li>Click <strong>"Start"</strong> to begin transcription</li>
+    <li>Allow microphone access when prompted</li>
+    <li>Speak into your microphone - text will appear in real-time</li>
+  </ol>
+  <p><strong>Important tips:</strong></p>
+  <ul style="margin: 8px 0; padding-left: 20px;">
+    <li>Use <strong>headphones</strong> to avoid echo/feedback</li>
+    <li>Works best in <strong>Chrome or Edge</strong> browser</li>
+    <li>Transcribes <strong>your microphone</strong> only (your side of the conversation)</li>
+    <li>All processing happens in your browser - no audio is uploaded</li>
+  </ul>
+  <div style="display:flex;gap:8px;margin-top:10px;">
+    <button id="open-page">Open demo page</button>
+    <button id="docs">Read README</button>
+  </div>
+  <div class="note">This extension uses your microphone only. It does not upload audio anywhere.</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

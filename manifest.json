@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Cortexa — Live Call Speech-to-Text (Optimized)",
+  "description": "Low-latency Chrome extension for live speech-to-text transcription during video calls. Captures both your microphone and remote participants using OpenAI Whisper with 2-second processing.",
+  "version": "2.1.0",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "tabCapture"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.openai.com/*"
+  ],
+  "action": {
+    "default_title": "Cortexa - Optimized",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content_script.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
