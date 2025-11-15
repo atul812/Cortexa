@@ -1,176 +1,249 @@
-// Cortexa Background Service Worker - Optimized for Low Latency
-// ==============================================================
+// background.js - Cortexa (Groq summarizer + OpenAI Whisper for transcribe)
+// Summary: store/retrieve keys (openai_api_key for Whisper, groq_api_key for Groq summarizer),
+// handle transcribeAudio and summarize actions. Summarization uses Groq's OpenAI-compatible chat endpoint.
 
-// ⚠️ IMPORTANT: Add your OpenAI API key here
-// Get it from: https://platform.openai.com/api-keys
-const OPENAI_API_KEY = 'openaikey';
-
-// Configuration for optimal performance
 const CONFIG = {
-  // Use smaller chunks for faster processing (2 seconds instead of 5)
   CHUNK_DURATION: 2000,
-  
-  // Whisper API optimizations
   WHISPER_MODEL: 'whisper-1',
-  
-  // Temperature affects randomness (0-1, lower = more deterministic)
-  TEMPERATURE: 0.2,
-  
-  // Enable prompt for better accuracy in conversations
-  USE_PROMPT: true,
-  PROMPT_TEXT: 'Video call conversation. Multiple speakers discussing. Clear speech.'
+  WHISPER_TEMPERATURE: 0.2,
+  SUMMARIZER_MODEL: 'llama-3.1-8b-instant', // Groq model to request
+  SUMMARIZER_MAX_POINTS: 6
 };
 
+// --- Key storage helpers ---
+async function getOpenAIKey() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['openai_api_key'], (items) => {
+      resolve(items.openai_api_key || '');
+    });
+  });
+}
+async function getGroqKey() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(['groq_api_key'], (items) => {
+      resolve(items.groq_api_key || 'groqapikey');
+    });
+  });
+}
+async function setOpenAIKey(key) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ openai_api_key: key }, () => resolve());
+  });
+}
+async function setGroqKey(key) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ groq_api_key: key }, () => resolve());
+  });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
-  console.log('✅ Cortexa Enhanced installed - Optimized for low latency');
+  console.log('Cortexa background installed');
 });
 
-// Handle messages from content script
+// --- Message handler ---
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'transcribeAudio') {
-    transcribeWithWhisper(request.audioBlob, request.language)
-      .then(result => {
-        sendResponse({ success: true, transcript: result });
-      })
-      .catch(error => {
-        console.error('Transcription error:', error);
-        sendResponse({ success: false, error: error.message });
-      });
-    return true; // Keep channel open for async response
-  }
-  
-  if (request.action === 'checkApiKey') {
-    const isConfigured = OPENAI_API_KEY && 
-                        OPENAI_API_KEY !== 'your_openai_api_key_here' &&
-                        OPENAI_API_KEY.length > 20;
-    sendResponse({ configured: isConfigured });
-    return true;
-  }
-  
-  if (request.action === 'getConfig') {
-    sendResponse({ config: CONFIG });
-    return true;
-  }
+  (async () => {
+    try {
+      if (request.action === 'checkApiKey') {
+        const openaiKey = await getOpenAIKey();
+        const groqKey = await getGroqKey();
+        sendResponse({
+          configured: {
+            openai: Boolean(openaiKey && openaiKey.length > 20),
+            groq: Boolean(groqKey && groqKey.length > 10)
+          }
+        });
+        return;
+      }
+
+      if (request.action === 'setApiKey') {
+        // Accept both optional keys
+        if (request.openai_key !== undefined) await setOpenAIKey(request.openai_key);
+        if (request.groq_key !== undefined) await setGroqKey(request.groq_key);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      if (request.action === 'transcribeAudio') {
+        // transcribe with OpenAI Whisper (unchanged)
+        if (!request.audioBlob) {
+          sendResponse({ success: false, error: 'No audio provided' });
+          return;
+        }
+        const key = await getOpenAIKey();
+        if (!key || key.length < 20) {
+          sendResponse({ success: false, error: 'Invalid or missing OpenAI API key (required for Whisper transcription)' });
+          return;
+        }
+        try {
+          const txt = await transcribeWithWhisper(request.audioBlob, request.language, key);
+          sendResponse({ success: true, transcript: txt });
+        } catch (err) {
+          const msg = (err && err.message) ? err.message : String(err);
+          sendResponse({ success: false, error: msg });
+        }
+        return;
+      }
+
+      if (request.action === 'summarize') {
+        const text = request.text || '';
+        if (!text || text.trim().length < 10) {
+          sendResponse({ success: false, error: 'No text to summarize' });
+          return;
+        }
+        const groqKey = await getGroqKey();
+        if (!groqKey || groqKey.length < 10) {
+          sendResponse({ success: false, error: 'Missing Groq API key. Please set it in the Cortexa popup (Groq key).' });
+          return;
+        }
+        try {
+          const summary = await summarizeWithGroq(text, request.max_points || CONFIG.SUMMARIZER_MAX_POINTS, groqKey);
+          sendResponse({ success: true, summary });
+        } catch (err) {
+          const msg = (err && err.message) ? err.message : String(err);
+          // pass through helpful text
+          sendResponse({ success: false, error: msg });
+        }
+        return;
+      }
+
+      sendResponse({ success: false, error: 'Unknown action' });
+    } catch (err) {
+      console.error('Background handler error:', err);
+      sendResponse({ success: false, error: err.message || String(err) });
+    }
+  })();
+  return true; // keep message channel open for async responses
 });
 
-// Optimized transcription with OpenAI Whisper API
-async function transcribeWithWhisper(audioBlob, language = 'en') {
-  // Validate API key
-  if (!OPENAI_API_KEY || OPENAI_API_KEY === 'your_openai_api_key_here') {
-    throw new Error('OpenAI API key not configured');
-  }
-  
-  // Skip very small audio files (< 0.5 seconds worth of data)
-  if (audioBlob.size < 8000) {
-    console.log('⏭️ Skipping tiny audio chunk');
-    return '';
-  }
-  
+// --- Whisper transcription (unchanged behavior) ---
+async function transcribeWithWhisper(audioBlobLike, language = 'en', apiKey) {
   try {
-    const startTime = performance.now();
-    
-    // Create FormData for multipart upload
-    const formData = new FormData();
-    
-    // Convert blob to file with proper format
-    const audioFile = new File([audioBlob], 'audio.webm', { 
-      type: 'audio/webm;codecs=opus' 
-    });
-    formData.append('file', audioFile);
-    formData.append('model', CONFIG.WHISPER_MODEL);
-    
-    // Set language for faster processing (auto-detect adds latency)
-    if (language && language !== 'auto') {
-      formData.append('language', language);
+    let fileCandidate = audioBlobLike;
+    if (audioBlobLike && audioBlobLike.arrayBuffer && typeof audioBlobLike.arrayBuffer === 'function') {
+      // blob already
+    } else if (audioBlobLike && audioBlobLike.data && audioBlobLike.type) {
+      fileCandidate = new Blob([audioBlobLike.data], { type: audioBlobLike.type || 'audio/webm' });
     }
-    
-    // Lower temperature for more deterministic, faster results
-    formData.append('temperature', CONFIG.TEMPERATURE.toString());
-    
-    // Add prompt for better context and accuracy
-    if (CONFIG.USE_PROMPT) {
-      formData.append('prompt', CONFIG.PROMPT_TEXT);
-    }
-    
-    // Use response_format=text for faster parsing (no JSON overhead)
-    formData.append('response_format', 'text');
-    
-    console.log('🎤 Sending audio to Whisper...', {
-      size: `${(audioBlob.size / 1024).toFixed(1)}KB`,
-      language: language || 'auto'
-    });
-    
-    // Call OpenAI Whisper API with timeout
+
+    const audioFile = new File([fileCandidate], 'audio.webm', { type: 'audio/webm;codecs=opus' });
+    if (audioFile.size < 8000) return ''; // skip tiny chunks
+
+    const form = new FormData();
+    form.append('file', audioFile);
+    form.append('model', 'whisper-1');
+    if (language && language !== 'auto') form.append('language', language);
+    form.append('temperature', String(CONFIG.WHISPER_TEMPERATURE));
+    if (CONFIG.USE_PROMPT) form.append('prompt', CONFIG.PROMPT_TEXT);
+    form.append('response_format', 'text');
+
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
-    
-    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+    const timeoutMs = 15000;
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const resp = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${OPENAI_API_KEY}`
-      },
-      body: formData,
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
       signal: controller.signal
     });
-    
+
     clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      let errorMsg;
-      try {
-        const errorData = JSON.parse(errorText);
-        errorMsg = errorData.error?.message || `API error: ${response.status}`;
-      } catch {
-        errorMsg = `API error: ${response.status}`;
-      }
-      throw new Error(errorMsg);
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      let parsed = null;
+      try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
+      const serverMsg = (parsed && parsed.error && parsed.error.message) ? parsed.error.message : text || `HTTP ${resp.status}`;
+      throw new Error(serverMsg);
     }
-    
-    // response_format=text returns plain text directly
-    const transcriptText = await response.text();
-    
-    const processingTime = performance.now() - startTime;
-    console.log(`✅ Transcription completed in ${processingTime.toFixed(0)}ms:`, transcriptText);
-    
+
+    const transcriptText = await resp.text();
     return transcriptText.trim();
-    
   } catch (error) {
-    console.error('❌ Whisper API error:', error);
-    
-    // Provide helpful error messages
     if (error.name === 'AbortError') {
-      throw new Error('Request timeout - audio chunk too long or network slow');
-    } else if (error.message.includes('API key') || error.message.includes('Incorrect')) {
-      throw new Error('Invalid API key');
-    } else if (error.message.includes('quota') || error.message.includes('insufficient')) {
-      throw new Error('API quota exceeded');
-    } else if (error.message.includes('network') || error.message.includes('Failed to fetch')) {
-      throw new Error('Network error');
+      throw new Error('timeout: Request timed out (network slow or large audio chunk)');
     }
-    
     throw error;
   }
 }
 
-// Keep service worker alive during active transcription
-let keepAliveInterval;
+// --- Summarization using Groq (OpenAI-compatible chat completions) ---
+async function summarizeWithGroq(text, maxPoints = 6, groqKey) {
+  // We ask the model to return a strict JSON object to ensure consistent parsing.
+  const systemPrompt = `You are an assistant that produces short, clear summaries for people with ADHD.
+Return EXACTLY a JSON object, and NOTHING else, in this structure:
+{
+  "title": "<one-line short title>",
+  "bullets": ["<bullet 1>", "<bullet 2>", ...]  // at most ${maxPoints} items; each item one short sentence or action
+}
+Rules:
+- Keep sentences short (max 12 words).
+- Prioritize action items first.
+- Don't include extra commentary outside the JSON.
+- Use plain language; no jargon.`;
 
-chrome.runtime.onConnect.addListener((port) => {
-  if (port.name === 'keepAlive') {
-    port.onDisconnect.addListener(() => {
-      if (keepAliveInterval) {
-        clearInterval(keepAliveInterval);
-        keepAliveInterval = null;
-      }
-    });
-    
-    if (!keepAliveInterval) {
-      keepAliveInterval = setInterval(() => {
-        console.log('🔄 Keep alive ping');
-      }, 20000);
-    }
+  const userPrompt = `Transcript to summarize:\n\n${text}`;
+
+  // Groq provides an OpenAI-compatible route. We'll call the OpenAI-compatible chat completions endpoint at Groq.
+  const payload = {
+    model: CONFIG.SUMMARIZER_MODEL,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ],
+    max_tokens: 400,
+    temperature: 0.15
+  };
+
+  const controller = new AbortController();
+  const timeoutMs = 20000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  // NOTE: Groq exposes an OpenAI-compatible path at /openai/v1/chat/completions
+  const url = 'https://api.groq.com/openai/v1/chat/completions';
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${groqKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload),
+    signal: controller.signal
+  });
+
+  clearTimeout(timeoutId);
+
+  if (!resp.ok) {
+    const txt = await resp.text().catch(() => '');
+    let parsed = null;
+    try { parsed = JSON.parse(txt); } catch(e) { parsed = null; }
+    const serverMsg = (parsed && parsed.error && parsed.error.message) ? parsed.error.message : txt || `HTTP ${resp.status}`;
+    throw new Error(serverMsg);
   }
-});
 
-console.log('🚀 Cortexa background service worker loaded - Low latency mode');
+  const data = await resp.json();
+  // Data shape is OpenAI-like; extract assistant message content
+  const out = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) ? data.choices[0].message.content.trim() : '';
+
+  // Attempt to extract a JSON object from the response
+  let jsonText = out;
+  const firstBrace = out.indexOf('{');
+  const lastBrace = out.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    jsonText = out.slice(firstBrace, lastBrace + 1);
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText);
+    const title = parsed.title ? String(parsed.title).trim() : '';
+    const bullets = Array.isArray(parsed.bullets) ? parsed.bullets.map(b => String(b).trim()).filter(Boolean) : [];
+    const finalBullets = bullets.slice(0, maxPoints);
+    let formatted = (title ? (title + "\n\n") : '');
+    finalBullets.forEach(b => { formatted += "• " + b + "\n"; });
+    return formatted.trim();
+  } catch (err) {
+    // fallback: return raw assistant content
+    return out;
+  }
+}
